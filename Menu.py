@@ -231,6 +231,7 @@ with col_sel:
 
 with col_up:
     st.markdown('<div class="section-label">Subir nuevo partido</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitulo">Se usan los archivos con la forma _zonas.csv</div>', unsafe_allow_html=True)
     st.markdown("""
     <div class="upload-zone">
         <div class="upload-zone-title">Arrastra tu CSV aquí</div>
