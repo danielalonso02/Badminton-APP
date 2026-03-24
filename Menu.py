@@ -196,6 +196,7 @@ col_sel, col_gap, col_up = st.columns([5, 0.4, 4])
 
 with col_sel:
     st.markdown('<div class="section-label">Seleccionar partido</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitulo">Carga un partido para ver sus estadísticas</div>', unsafe_allow_html=True)
 
     DATA_FOLDER = "datos"
     folder = Path(DATA_FOLDER)

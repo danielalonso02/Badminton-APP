@@ -69,12 +69,12 @@ def login_page():
         from pathlib import Path
         logo_path = Path("imagenes/logo.png")
         if logo_path.exists():
-            st.image(str(logo_path), width=220)
+            st.image(str(logo_path), width=450)
         else:
             st.markdown('<div style="text-align:center;font-size:32px;">🏸</div>', unsafe_allow_html=True)
         st.markdown("""
         <div style="text-align:center; margin-bottom:32px;">
-          <div style="font-size:22px; font-weight:600; color:#f9fafb; margin-top:8px;">
+          <div style="font-size:32px; font-weight:600; color:grey; margin-top:8px;">
             Badminton Analytics
           </div>
           <div style="font-size:13px; color:#6b7280; margin-top:4px; font-family:'DM Mono',monospace;">

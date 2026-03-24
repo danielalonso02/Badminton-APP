@@ -242,48 +242,7 @@ if not rally_stats.empty:
                      use_container_width=True)
 else:
     st.info("Sin datos de rallies.")
-
-
-# ─────────────────────────────────────────
-# 4 · FLUJO DE FASES (SANKEY)
-# ─────────────────────────────────────────
-st.markdown('<div class="section-title" style="font-size:14px;">Flujo de fases · Construcción → Ataque → Defensa</div>',
-            unsafe_allow_html=True)
-
-if "Game Phase" in strokes_f.columns and "Rally" in strokes_f.columns:
-
-    # Construir transiciones consecutivas entre fases dentro de cada rally
-    PHASE_COLORS = {
-        "Construccion": "#3b82f6", "Construcción": "#3b82f6",
-        "Attack": "#f87171", "Defence": "#facc15",
-    }
-    OUTCOME_COLORS = {"Victoria": "#4ade80", "Derrota": "#f87171"}
-    EXTRA = ["#a78bfa", "#fb923c", "#38bdf8"]
-
-    jugador_col = "Jugador del golpeo"
-
-    def get_rally_winner(outcome, p1, p2):
-        """Devuelve el nombre del ganador del rally o None."""
-        o = str(outcome)
-        if f"Error {p2}" in o or f"Unforced {p2}" in o:
-            return p1
-        if f"Error {p1}" in o or f"Unforced {p1}" in o:
-            return p2
-        if p1 in o:
-            return p1
-        if p2 in o:
-            return p2
-        return None
-
-    # Precalcular ganador de cada rally usando el df completo
-    outcome_col = "Rally Outcome"
-    rally_winners = {}
-    if outcome_col in strokes_f.columns:
-        last_per_rally = strokes_f.sort_values("Stroke").groupby("rally_id").last().reset_index()
-        for _, row in last_per_rally.iterrows():
-            winner = get_rally_winner(row.get(outcome_col, ""), player1, player2)
-            rally_winners[row["rally_id"]] = winner
-
+    
     def build_transitions(player_strokes, player_name):
         """
         Transiciones del jugador consigo mismo (golpe n → golpe n+1 del mismo jugador)
@@ -305,94 +264,128 @@ if "Game Phase" in strokes_f.columns and "Rally" in strokes_f.columns:
                 trans[(phases[-1], result)] = trans.get((phases[-1], result), 0) + 1
         return trans
 
-    def plot_player_flow(trans, player_name, color):
-        if not trans:
-            st.info(f"Sin datos para {player_name}")
-            return
 
-        # Nodos: fases + Victoria/Derrota
-        phase_nodes = sorted(set(n for (a, b) in trans for n in [a, b]
-                                 if n not in ("Victoria", "Derrota")))
-        outcome_nodes = [n for n in ["Victoria", "Derrota"]
-                         if any(b == n for (a, b) in trans)]
-        
-        x_nodes = phase_nodes + outcome_nodes   # columnas
-        y_nodes = phase_nodes                  # filas
-        all_nodes = phase_nodes + outcome_nodes
+# ─────────────────────────────────────────
+# 4 · FLUJO DE FASES (MATRICES Y TRANSICIONES)
+# ─────────────────────────────────────────
+st.markdown('<div class="section-title" style="font-size:14px;">Análisis de Iniciativa y Flujo de Fases</div>', unsafe_allow_html=True)
 
-        # Matriz solo entre fases (sin Victoria/Derrota)
-        matrix = pd.DataFrame(0, index=y_nodes, columns=x_nodes)
+if "Game Phase" in strokes_f.columns and "Rally" in strokes_f.columns:
+
+    # 1. Configuración de Traducción y Colores
+    PHASE_TRANSLATION = {
+        "Attack": "Ataque", "Defence": "Defensa",
+        "Construccion": "Construcción", "Construcción": "Construcción"
+    }
+    PHASE_COLORS = {"Construcción": "#3b82f6", "Ataque": "#f87171", "Defensa": "#facc15"}
+    OUTCOME_COLORS = {"Victoria": "#4ade80", "Derrota": "#f87171"}
+
+    # Traducir columna en el DataFrame local
+    strokes_f = strokes_f.copy()
+    strokes_f["Game Phase"] = strokes_f["Game Phase"].map(PHASE_TRANSLATION).fillna(strokes_f["Game Phase"])
+
+    # --- FUNCIONES DE LÓGICA (RECUPERADAS) ---
+    def get_rally_winner(outcome, p1, p2):
+        o = str(outcome)
+        if f"Error {p2}" in o or f"Unforced {p2}" in o: return p1
+        if f"Error {p1}" in o or f"Unforced {p1}" in o: return p2
+        if p1 in o: return p1
+        if p2 in o: return p2
+        return None
+
+    def build_transitions(player_strokes, player_name, rally_winners):
+        trans = {}
+        for rid, group in player_strokes.sort_values("Stroke").groupby("rally_id"):
+            phases = group["Game Phase"].dropna().tolist()
+            if not phases: continue
+            for a, b in zip(phases[:-1], phases[1:]):
+                trans[(a, b)] = trans.get((a, b), 0) + 1
+            winner = rally_winners.get(rid)
+            if winner is not None:
+                result = "Victoria" if winner == player_name else "Derrota"
+                trans[(phases[-1], result)] = trans.get((phases[-1], result), 0) + 1
+        return trans
+
+    def get_matrix_df(trans):
+        phase_nodes = sorted(set(n for (a, b) in trans for n in [a, b] if n not in ("Victoria", "Derrota")))
+        all_nodes = phase_nodes + [n for n in ["Victoria", "Derrota"] if any(b == n for (a, b) in trans)]
+        matrix = pd.DataFrame(0.0, index=phase_nodes, columns=all_nodes)
         for (a, b), v in trans.items():
-            if a in y_nodes  and b in x_nodes:
+            if a in matrix.index and b in matrix.columns: 
                 matrix.loc[a, b] = v
+        return matrix
 
-        fig_hm = go.Figure(go.Heatmap(
-            z=matrix.values,
-            x=list(matrix.columns),
-            y=list(matrix.index),
-            colorscale=[[0.0, "#0f1117"], [0.01, "#1e3a5f"],
-                        [0.4, color], [1.0, "#facc15"]],
-            text=matrix.values,
-            texttemplate="%{text}",
-            textfont=dict(size=13, color="white"),
-            showscale=False,
-            hovertemplate="De: <b>%{y}</b><br>A: <b>%{x}</b><br>Veces: <b>%{z}</b><extra></extra>",
+    # --- FUNCIONES DE DIBUJO ---
+    def plot_matrix_total(matrix, player_name, color):
+        fig = go.Figure(go.Heatmap(
+            z=matrix.values, x=list(matrix.columns), y=list(matrix.index),
+            colorscale=[[0.0, "#0f1117"], [0.01, "#1e3a5f"], [0.4, color], [1.0, "#facc15"]],
+            text=matrix.values, texttemplate="%{text}", textfont=dict(size=13, color="white"),
+            showscale=False, hovertemplate="De: <b>%{y}</b><br>A: <b>%{x}</b><br>Veces: <b>%{z}</b><extra></extra>",
         ))
-        fig_hm.update_layout(
-            **{k: v for k, v in BASE_LAYOUT.items() if k != "legend"},
-            height=300,
-            title=dict(text=f"{player_name.split()[0]} · matriz de iniciativa",
-                       font=dict(size=13, color=FONT_COL), x=0),
-            xaxis=dict(title="Destino", tickfont=dict(size=11, color="#f9fafb"), side="bottom"),
-            yaxis=dict(title="Origen", tickfont=dict(size=11, color="#f9fafb"), autorange="reversed"),
-        )
-        st.plotly_chart(fig_hm, use_container_width=True)
+        fig.update_layout(**{k: v for k, v in BASE_LAYOUT.items() if k != "legend"}, height=280,
+                          title=dict(text=f"{player_name.split()[0]} · Matriz Total", font=dict(size=12, color=FONT_COL), x=0))
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
 
-        # Barras: transiciones más frecuentes incluyendo Victoria/Derrota
-        trans_rows = [{"Transición": f"{a} → {b}", "Veces": v, "origen": a}
-                      for (a, b), v in trans.items()]
-        trans_df = (pd.DataFrame(trans_rows)
-                    .sort_values("Veces", ascending=True)
-                    .tail(12))
-        bcolors = []
-        for _, row in trans_df.iterrows():
-            dest = row["Transición"].split(" → ")[1]
-            if dest in OUTCOME_COLORS:
-                bcolors.append(OUTCOME_COLORS[dest])
-            else:
-                bcolors.append(PHASE_COLORS.get(row["origen"], color))
-
-        fig_bar = go.Figure(go.Bar(
-            x=trans_df["Veces"], y=trans_df["Transición"],
-            orientation="h", marker_color=bcolors, opacity=0.85,
-            text=trans_df["Veces"], textposition="outside",
-            textfont=dict(size=10, color=FONT_COL),
+    def plot_matrix_percent(matrix, player_name, color):
+        matrix_pct = matrix.div(matrix.sum(axis=1), axis=0).fillna(0) * 100
+        fig = go.Figure(go.Heatmap(
+            z=matrix_pct.values, x=list(matrix_pct.columns), y=list(matrix_pct.index),
+            colorscale=[[0.0, "#0f1117"], [1.0, color]],
+            text=matrix_pct.values, texttemplate="%{text:.1f}%", textfont=dict(size=12, color="white"),
+            showscale=False, hovertemplate="Origen: <b>%{y}</b><br>Destino: <b>%{x}</b><br>%: <b>%{z:.1f}%</b><extra></extra>",
         ))
-        fig_bar.update_layout(
-            **{k: v for k, v in BASE_LAYOUT.items() if k != "legend"},
-            height=max(280, len(trans_df) * 34 + 60),
-            showlegend=False,
-            title=dict(text=f"{player_name.split()[0]} · transiciones más frecuentes",
-                       font=dict(size=13, color=FONT_COL), x=0),
-            xaxis=ax("Nº veces"),
-            yaxis=dict(tickfont=dict(size=11, color="#f9fafb")),
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        fig.update_layout(**{k: v for k, v in BASE_LAYOUT.items() if k != "legend"}, height=280,
+                          title=dict(text=f"{player_name.split()[0]} · Distribución (El % de destinos por cada origen)", font=dict(size=12, color="#facc15"), x=0))
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
 
-    # Calcular y mostrar por jugadora
-    if jugador_col in strokes_f.columns and "Game Phase" in strokes_f.columns:
-        p1_strokes_f = strokes_f[strokes_f[jugador_col] == player1]
-        p2_strokes_f = strokes_f[strokes_f[jugador_col] == player2]
+    def plot_transition_bars(trans, player_name, color):
+        trans_rows = [{"Transición": f"{a} → {b}", "Veces": v, "origen": a} for (a, b), v in trans.items()]
+        if not trans_rows: return
+        trans_df = pd.DataFrame(trans_rows).sort_values("Veces", ascending=True).tail(10)
+        bcolors = [OUTCOME_COLORS[r["Transición"].split(" → ")[1]] if r["Transición"].split(" → ")[1] in OUTCOME_COLORS 
+                   else PHASE_COLORS.get(r["origen"], color) for _, r in trans_df.iterrows()]
+        
+        fig = go.Figure(go.Bar(x=trans_df["Veces"], y=trans_df["Transición"], orientation="h", 
+                               marker_color=bcolors, text=trans_df["Veces"], textposition="outside"))
+        fig.update_layout(**{k: v for k, v in BASE_LAYOUT.items() if k != "legend"}, height=320,
+                          title=dict(text=f"{player_name.split()[0]} · Top Transiciones", font=dict(size=12, color=FONT_COL), x=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-        trans_p1 = build_transitions(p1_strokes_f, player1)
-        trans_p2 = build_transitions(p2_strokes_f, player2)
+    # --- PROCESAMIENTO ---
+    outcome_col = "Rally Outcome"
+    rally_winners = {}
+    if outcome_col in strokes_f.columns:
+        last_per_rally = strokes_f.sort_values("Stroke").groupby("rally_id").last().reset_index()
+        for _, row in last_per_rally.iterrows():
+            winner = get_rally_winner(row.get(outcome_col, ""), player1, player2)
+            rally_winners[row["rally_id"]] = winner
 
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            plot_player_flow(trans_p1, player1, PLAYER_COLORS[0])
-        with col_f2:
-            plot_player_flow(trans_p2, player2, PLAYER_COLORS[1])
-    else:
-        st.info("No hay suficientes datos de fases para construir el flujo.")
+    p1_strokes = strokes_f[strokes_f[jugador_col] == player1]
+    p2_strokes = strokes_f[strokes_f[jugador_col] == player2]
+    
+    trans_p1 = build_transitions(p1_strokes, player1, rally_winners)
+    trans_p2 = build_transitions(p2_strokes, player2, rally_winners)
+
+    mat_p1 = get_matrix_df(trans_p1)
+    mat_p2 = get_matrix_df(trans_p2)
+
+    # --- RENDERIZADO POR FILAS ---
+    col1, col2 = st.columns(2)
+
+    # FILA 1: Heatmap Total
+    with col1: plot_matrix_total(mat_p1, player1, PLAYER_COLORS[0])
+    with col2: plot_matrix_total(mat_p2, player2, PLAYER_COLORS[1])
+
+    # FILA 2: Heatmap %
+    with col1: plot_matrix_percent(mat_p1, player1, PLAYER_COLORS[0])
+    with col2: plot_matrix_percent(mat_p2, player2, PLAYER_COLORS[1])
+
+    # FILA 3: Barras horizontales
+    with col1: plot_transition_bars(trans_p1, player1, PLAYER_COLORS[0])
+    with col2: plot_transition_bars(trans_p2, player2, PLAYER_COLORS[1])
+
 else:
-    st.info("No se encontraron columnas 'Game Phase' o 'Rally'.")
+    st.info("No se encontraron columnas de fase o rally para realizar el análisis.")

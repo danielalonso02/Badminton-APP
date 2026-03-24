@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import (get_df, preprocess, STYLES, PLAYER_COLORS, sidebar_logo,
-                   base_court_fig, add_net_label, ZONE_COORDS_OWN)
+                   base_court_fig, add_net_label, ZONE_COORDS_OWN, court_shapes)
 
 st.set_page_config(page_title="Detalle rally · Badminton", page_icon="🏸", layout="wide")
 sidebar_logo()
@@ -24,6 +24,37 @@ BASE_LAYOUT = dict(
     font=dict(family="DM Sans, sans-serif", color=FONT_COL),
     margin=dict(l=40, r=20, t=48, b=40),
 )
+
+# ── Funciones helper para rotación ──
+def swap_xy(x, y):
+    return y, x
+
+def rotate_shapes(shapes):
+    rotated = []
+    for s in shapes:
+        s2 = s.copy()
+        if all(k in s2 for k in ["x0", "y0", "x1", "y1"]):
+            s2["x0"], s2["y0"] = s2["y0"], s2["x0"]
+            s2["x1"], s2["y1"] = s2["y1"], s2["x1"]
+        rotated.append(s2)
+    return rotated
+
+def base_court_fig_horizontal(title=""):
+    fig = go.Figure()
+    fig.update_layout(
+        title=dict(text=title, x=0, font=dict(size=14, color="#f9fafb")),
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
+        # Rango invertido para vista horizontal: X es largo (0-1), Y es ancho (0-3)
+        xaxis=dict(range=[-0.05, 1.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        yaxis=dict(range=[-0.05, 3.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        height=400,
+        margin=dict(l=10, r=10, t=40, b=10),
+        shapes=rotate_shapes(court_shapes()),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.08, x=0, font=dict(size=11, color="#f9fafb"))
+    )
+    return fig
 
 # ── Datos ────────────────────────────────
 df = get_df()
@@ -152,62 +183,72 @@ col_court, col_gantt = st.columns([1, 1])
 with col_court:
     st.markdown('<div class="section-title" style="font-size:14px;">Trayectoria en pista</div>', unsafe_allow_html=True)
 
-    fig_court = base_court_fig(f"Set {set_num} · Rally {rally_num}", height=320)
-    fig_court.update_layout(showlegend=True,
-                            legend=dict(orientation="h", y=-0.06, x=0,
-                                        font=dict(size=11, color="#f9fafb")))
-    xs, ys, colors_traj, labels = [], [], [], []
+    fig_court = base_court_fig_horizontal("")
+    
+    xs_raw, ys_raw, colors_traj, labels = [], [], [], []
 
     for _, row in rally_strokes.iterrows():
         player = row.get(jugador_col, "")
         nx, ny = row.get("nx"), row.get("ny")
-        zone   = row.get("Zone")
+        zone = row.get("Zone")
+        
         if pd.isna(nx) or pd.isna(ny):
             if pd.notna(zone) and int(zone) in ZONE_COORDS_OWN:
                 nx, ny = ZONE_COORDS_OWN[int(zone)]
+        
         if pd.notna(nx) and pd.notna(ny):
-            xs.append(float(nx))
-            ys.append(float(ny))
+            xs_raw.append(float(nx))
+            ys_raw.append(float(ny))
             colors_traj.append(PLAYER_COLORS[0] if player == player1 else PLAYER_COLORS[1])
             phase = row.get("Game Phase", "")
             labels.append(f"Golpe {int(row['Stroke']) if pd.notna(row.get('Stroke')) else '?'} · {str(player).split()[0]}<br>Fase: {phase}")
 
-    if len(xs) >= 2:
+    if len(xs_raw) >= 1:
+        # 1. Obtenemos las coordenadas giradas básicas
+        xs_swapped, ys_swapped = zip(*[swap_xy(x, y) for x, y in zip(xs_raw, ys_raw)])
+        
+        # 2. Reflejamos el eje Y (ancho de la pista) para corregir el efecto espejo
+        # Como el rango del ancho de la pista es de 0 a 3, reflejamos restando de 3.0
+        xs_rot = xs_swapped # El largo (0-1) se mantiene
+        ys_rot = [3.0 - y for y in ys_swapped] # Reflejamos el ancho
+
+        # Línea de trayectoria
         fig_court.add_trace(go.Scatter(
-            x=xs, y=ys, mode="lines",
+            x=xs_rot, y=ys_rot, mode="lines",
             line=dict(color="rgba(255,255,255,0.25)", width=1.5, dash="dot"),
             showlegend=False, hoverinfo="skip",
         ))
+        
+        # Marcadores con número de golpe
         fig_court.add_trace(go.Scatter(
-            x=xs, y=ys, mode="markers+text",
-            marker=dict(size=13, color=colors_traj,
-                        line=dict(width=1.5, color="rgba(0,0,0,0.5)")),
-            text=[str(i + 1) for i in range(len(xs))],
+            x=xs_rot, y=ys_rot, mode="markers+text",
+            marker=dict(size=13, color=colors_traj, line=dict(width=1.5, color="rgba(0,0,0,0.5)")),
+            text=[str(i + 1) for i in range(len(xs_rot))],
             textfont=dict(size=8, color="white"),
             textposition="middle center",
             hovertext=labels,
             hovertemplate="%{hovertext}<extra></extra>",
             showlegend=False,
         ))
-        for i in range(len(xs) - 1):
+        
+        # Flechas
+        for i in range(len(xs_rot) - 1):
             fig_court.add_annotation(
-                ax=xs[i], ay=ys[i], x=xs[i + 1], y=ys[i + 1],
+                ax=xs_rot[i], ay=ys_rot[i], x=xs_rot[i + 1], y=ys_rot[i + 1],
                 xref="x", yref="y", axref="x", ayref="y",
                 showarrow=True, arrowhead=2, arrowsize=1,
                 arrowwidth=1.2, arrowcolor="rgba(255,255,255,0.45)",
             )
+        
+        # Leyenda manual para jugadores
+        fig_court.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+            marker=dict(size=10, color=PLAYER_COLORS[0]), name=player1.split()[0], showlegend=True))
+        fig_court.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+            marker=dict(size=10, color=PLAYER_COLORS[1]), name=player2.split()[0], showlegend=True))
     else:
-        fig_court.add_annotation(x=1.5, y=0.5, text="Sin coordenadas",
-                                 font=dict(color="white", size=12), showarrow=False)
+        fig_court.add_annotation(x=0.5, y=1.5, text="Sin coordenadas", showarrow=False)
 
-    fig_court.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
-        marker=dict(size=10, color=PLAYER_COLORS[0]), name=player1.split()[0], showlegend=True))
-    fig_court.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
-        marker=dict(size=10, color=PLAYER_COLORS[1]), name=player2.split()[0], showlegend=True))
-
-    add_net_label(fig_court)
     st.plotly_chart(fig_court, use_container_width=True)
-
 
 # ── Gantt de golpeos ─────────────────────
 with col_gantt:
@@ -297,7 +338,7 @@ with col_gantt:
     x_title = "Tiempo (s)" if has_pos else "Secuencia"
     fig_gantt.update_layout(
         **BASE_LAYOUT,
-        height=max(320, n_golpes * 22 + 60),
+        height=max(400, n_golpes * 22 + 60),
         showlegend=True,
         legend=dict(orientation="v", x=1.02, y=1,
                     font=dict(size=10, color="#f9fafb")),

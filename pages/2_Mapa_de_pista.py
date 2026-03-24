@@ -1,27 +1,25 @@
-"""
-pages/2_Mapa_de_pista.py  ·  Heatmap de zonas y trayectorias
-"""
-
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import sys
 from pathlib import Path
 
+# Configuración de rutas (manteniendo tu estructura)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import (get_df, preprocess, STYLES, PLAYER_COLORS, sidebar_logo,
                    base_court_fig, zone_heatmap_fig, add_net_label,
                    court_shapes, ZONE_COORDS_OWN, ZONE_COORDS_OPP)
 
+# ── Configuración de la página ─────────
 st.set_page_config(page_title="Mapa de pista · Badminton", page_icon="🏸", layout="wide")
 sidebar_logo()
 st.markdown(STYLES, unsafe_allow_html=True)
 
-# ── Datos ────────────────────────────────
+# ── Datos ───────────────────────────────
 df = get_df()
 strokes, _, _, player1, player2 = preprocess(df)
 
-# ── Parseo de coordenadas XY ─────────────
+# ── Parseo y Normalización ───────────
 def parse_xy(nombre):
     try:
         coords = str(nombre).split("(")[0].strip()
@@ -29,8 +27,6 @@ def parse_xy(nombre):
         return float(x), float(y)
     except Exception:
         return None, None
-
-strokes[["coord_x", "coord_y"]] = strokes["Nombre"].apply(lambda n: pd.Series(parse_xy(n)))
 
 def normalize_xy(df_in):
     out = df_in.copy()
@@ -41,6 +37,8 @@ def normalize_xy(df_in):
     out["ny"] = out["ny"].clip(0.0, 1.0)
     return out
 
+# Procesamiento de coordenadas
+strokes[["coord_x", "coord_y"]] = strokes["Nombre"].apply(lambda n: pd.Series(parse_xy(n)))
 strokes = normalize_xy(strokes)
 
 # ── Filtros sidebar ──────────────────────
@@ -60,9 +58,63 @@ def apply_filters(df_in):
         out = out[out["Game Phase"] == phase_sel]
     return out
 
+# NUEVA LÓGICA DE ESTABILIZACIÓN DE LADO PARA LOS DATAFRAMES FILTRADOS:
+# Determinamos el lado "propio" deseado: Fitriani (p1) -> Izquierda (ny < 0.5) and Mutiara (p2) -> Derecha (ny > 0.5)
+
+def stabilizar_lado_jugador(df_in, side_desired):
+    out = df_in.copy()
+    if side_desired == "left": # Queremos ny < 0.5 (lado cercano/izquierdo de la red)
+        # Para los puntos que estén en ny > 0.5 (lado lejano/derecho), los volteamos
+        mask_voltear = out["ny"] > 0.5
+        out.loc[mask_voltear, "nx"] = 3.0 - out.loc[mask_voltear, "nx"]
+        out.loc[mask_voltear, "ny"] = 1.0 - out.loc[mask_voltear, "ny"]
+    elif side_desired == "right": # Queremos ny > 0.5 (lado lejano/derecho de la red)
+        # Para los puntos que estén en ny < 0.5 (lado cercano/izquierdo), los volteamos
+        mask_voltear = out["ny"] < 0.5
+        out.loc[mask_voltear, "nx"] = 3.0 - out.loc[mask_voltear, "nx"]
+        out.loc[mask_voltear, "ny"] = 1.0 - out.loc[mask_voltear, "ny"]
+    return out
+
 jugador_col = "Jugador del golpeo"
+# Creamos los dataframes filtrados
 p1_f = apply_filters(strokes[strokes[jugador_col] == player1]) if jugador_col in strokes.columns else strokes.iloc[0:0]
 p2_f = apply_filters(strokes[strokes[jugador_col] == player2]) if jugador_col in strokes.columns else strokes.iloc[0:0]
+
+# Estabilizamos los dataframes de jugador: p1 -> izquierda and p2 -> derecha
+if not p1_f.empty:
+    p1_f = stabilizar_lado_jugador(p1_f, "left")
+if not p2_f.empty:
+    p2_f = stabilizar_lado_jugador(p2_f, "right")
+
+# ── Funciones helper de dibujo ─────────────
+def swap_xy(x, y):
+    return y, x
+
+def rotate_shapes(shapes):
+    rotated = []
+    for s in shapes:
+        s2 = s.copy()
+        if all(k in s2 for k in ["x0", "y0", "x1", "y1"]):
+            s2["x0"], s2["y0"] = s2["y0"], s2["x0"]
+            s2["x1"], s2["y1"] = s2["y1"], s2["x1"]
+        rotated.append(s2)
+    return rotated
+
+def base_court_fig_horizontal(title=""):
+    fig = go.Figure()
+    fig.update_layout(
+        title=dict(text=title, x=0, font=dict(size=14, color="#f9fafb")),
+        paper_bgcolor="#0f1117",
+        plot_bgcolor="#0f1117",
+        xaxis=dict(range=[-0.05, 1.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        yaxis=dict(range=[-0.05, 3.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        height=520,
+        margin=dict(l=10, r=60, t=40, b=10),
+        shapes=rotate_shapes(court_shapes()),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.04, font=dict(size=11, color="#f9fafb"))
+    )
+    return fig
 
 # ── 1 · Heatmap ──────────────────────────
 st.markdown('<div class="section-title" style="font-size:14px;">Heatmap de zonas · posición de golpeo (campo propio)</div>', unsafe_allow_html=True)
@@ -72,91 +124,42 @@ with col1:
 with col2:
     st.plotly_chart(zone_heatmap_fig(p2_f, player2, "pink"), use_container_width=True)
 
-
-# ── 1b · Scatter posición de golpeos ─────
-st.markdown('<div class="section-title" style="font-size:14px;">Posición de golpeos sobre la pista</div>', unsafe_allow_html=True)
+# ── 1b · Scatter horizontal ──────────────
+st.markdown('<div class="section-title" style="font-size:14px;">Posición de golpeos sobre la pista (horizontal)</div>', unsafe_allow_html=True)
 
 def full_court_scatter(p1_df, p2_df):
-    import random, numpy as np
-    fig = go.Figure()
-    fig.update_layout(
-        paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        height=520,
-        margin=dict(l=10, r=60, t=36, b=10),
-        xaxis=dict(range=[-0.05, 3.05], showgrid=False, zeroline=False,
-                   showticklabels=False, fixedrange=True),
-        yaxis=dict(range=[-0.05, 1.05], showgrid=False, zeroline=False,
-                   showticklabels=False, fixedrange=True,
-                   scaleanchor="x", scaleratio=6.59),
-        shapes=court_shapes(),
-        showlegend=True,
-        legend=dict(orientation="h", y=-0.04, font=dict(size=11, color="#f9fafb")),
-        title=dict(text="Cada círculo = un golpe",
-                   font=dict(size=12, color="#9ca3af"), x=0),
-    )
+    fig = base_court_fig_horizontal("Scatter de golpes")
 
-    rng = np.random.default_rng(42)
-
-    # P1 siempre en mitad inferior (y=0..0.5), P2 siempre en superior (y=0.5..1)
-    # Si las coordenadas reales están en la mitad equivocada, las reflejamos
-    for df_in, pname, color, own_half in [
-        (p1_df, player1.split()[0], PLAYER_COLORS[0], "bottom"),
-        (p2_df, player2.split()[0], PLAYER_COLORS[1], "top"),
+    for df_in, pname, color in [
+        (p1_df, player1.split()[0], PLAYER_COLORS[0]),
+        (p2_df, player2.split()[0], PLAYER_COLORS[1]),
     ]:
-        has_xy = "nx" in df_in.columns and df_in["nx"].notna().any()
-
-        if has_xy:
-            valid = df_in[df_in["nx"].notna() & df_in["ny"].notna()].copy()
-            raw_xs = valid["nx"].tolist()
-            raw_ys = valid["ny"].tolist()
-            phases = valid["Game Phase"].fillna("—").tolist() if "Game Phase" in valid.columns else ["—"] * len(raw_xs)
-            # Normalizar: P1 → mitad inferior (ny < 0.5), P2 → mitad superior (ny > 0.5)
-            xs, ys = [], []
-            for x, y in zip(raw_xs, raw_ys):
-                if own_half == "bottom":
-                    # Aseguramos que el punto esté en y < 0.5
-                    ny = y if y < 0.5 else 1.0 - y
-                else:
-                    # Aseguramos que el punto esté en y > 0.5
-                    ny = y if y >= 0.5 else 1.0 - y
-                xs.append(x)
-                ys.append(ny)
-        elif "Zone" in df_in.columns:
-            xs, ys, phases = [], [], []
-            for _, row in df_in.iterrows():
-                z = pd.to_numeric(row.get("Zone"), errors="coerce")
-                if pd.notna(z) and int(z) in ZONE_COORDS_OWN:
-                    cx, cy = ZONE_COORDS_OWN[int(z)]
-                    base_y = float(cy)
-                    if own_half == "top":
-                        base_y = 1.0 - base_y
-                    xs.append(float(cx) + rng.uniform(-0.08, 0.08))
-                    ys.append(base_y + rng.uniform(-0.02, 0.02))
-                    phases.append(str(row.get("Game Phase", "—")))
-        else:
+        if "nx" not in df_in.columns or df_in["nx"].notna().sum() == 0:
             continue
+            
+        valid = df_in[df_in["nx"].notna() & df_in["ny"].notna()].copy()
+        
+        raw_xs = valid["nx"].tolist()
+        raw_ys = valid["ny"].tolist()
+        phases = valid["Game Phase"].fillna("—").tolist() if "Game Phase" in valid.columns else ["—"]*len(raw_xs)
+
+        # Invertimos X e Y para la vista horizontal (de ahí el swap_xy)
+        xs_rot, ys_rot = zip(*[swap_xy(x, y) for x, y in zip(raw_xs, raw_ys)])
 
         fig.add_trace(go.Scatter(
-            x=xs, y=ys, mode="markers",
-            marker=dict(size=5, color=color, opacity=0.65,
-                        line=dict(width=0.5, color="rgba(0,0,0,0.3)")),
+            x=xs_rot, y=ys_rot, mode="markers",
+            marker=dict(size=6, color=color, opacity=0.7,
+                        line=dict(width=0.5, color="white")),
             name=pname,
             text=phases,
-            hovertemplate=f"<b>{pname}</b><br>Fase: %{{text}}<extra></extra>",
+            hovertemplate=f"<b>{pname}</b><br>Fase: %{{text}}<extra></extra>"
         ))
-
-    fig.add_annotation(x=3.04, y=0.25, xref="x", yref="y", text="Propio",
-                       showarrow=False, font=dict(size=9, color="rgba(255,255,255,0.45)", family="DM Mono"), xanchor="left")
-    fig.add_annotation(x=3.04, y=0.75, xref="x", yref="y", text="Rival",
-                       showarrow=False, font=dict(size=9, color="rgba(255,255,255,0.45)", family="DM Mono"), xanchor="left")
-    fig.add_annotation(x=1.5, y=0.5, xref="x", yref="y", text="RED",
-                       showarrow=False, font=dict(size=10, color="rgba(250,204,21,0.9)", family="DM Mono"))
     return fig
 
 st.plotly_chart(full_court_scatter(p1_f, p2_f), use_container_width=True)
 
-# ── 2 · Trayectorias ─────────────────────
-st.markdown('<div class="section-title" style="font-size:14px;">Trayectoria · secuencia de golpeos por rally</div>', unsafe_allow_html=True)
+# ── 2 · Trayectorias horizontal ─────────
+st.markdown('<div class="section-title" style="font-size:14px;">Trayectoria · secuencia de golpeos por rally (horizontal)</div>', unsafe_allow_html=True)
 
 if "rally_id" in strokes.columns:
     rallies_available = sorted(strokes["rally_id"].dropna().unique().tolist(),
@@ -171,8 +174,8 @@ else:
     with col_sel:
         rally_id = st.selectbox("Selecciona un rally", options=rallies_available,
                                 format_func=lambda x: f"Set {x.split('_')[0]} · Rally {int(float(x.split('_')[1]))}")
-
-    rally_strokes = apply_filters(strokes[strokes["rally_id"] == rally_id]).sort_values("Stroke")
+    
+    rally_strokes = strokes[strokes["rally_id"] == rally_id].sort_values("Stroke")
 
     with col_info:
         n_strokes = len(rally_strokes)
@@ -187,64 +190,70 @@ else:
         </div>""", unsafe_allow_html=True)
 
     def trajectory_fig(rally_df):
-        fig = base_court_fig(f"Set {rally_id.split('_')[0]} · Rally {int(float(rally_id.split('_')[1]))} · trayectoria")
-        fig.update_layout(showlegend=True,
-                          legend=dict(orientation="h", y=-0.04, x=0,
-                                      font=dict(size=11, color="#9ca3af")))
+        fig = base_court_fig_horizontal(f"Rally {rally_id}")
         xs, ys, colors_traj, labels = [], [], [], []
 
         for _, row in rally_df.iterrows():
-            player  = row.get(jugador_col, "")
-            nx = row.get("nx", None)
-            ny = row.get("ny", None)
-            zone = row.get("Zone", None)
-            if pd.isna(nx) or pd.isna(ny):
-                if pd.notna(zone) and int(zone) in ZONE_COORDS_OWN:
-                    nx, ny = ZONE_COORDS_OWN[int(zone)]
+            player = row.get(jugador_col, "")
+            nx, ny = row.get("nx", None), row.get("ny", None)
+            
             if pd.notna(nx) and pd.notna(ny):
-                xs.append(float(nx))
-                ys.append(float(ny))
+                # NUEVA LÓGICA DE ESTABILIZACIÓN DE TRAYECTORIA:
+                # Determinamos el lado "propio" deseado: p1 -> izquierda and p2 -> derecha
+                if player == player1: # Es Fitriani
+                    # Queremos ny < 0.5. Para los puntos en ny > 0.5, los volteamos.
+                    if ny > 0.5:
+                        nx = 3.0 - nx
+                        ny = 1.0 - ny
+                elif player == player2: # Es Mutiara
+                    # Queremos ny > 0.5. Para los puntos en ny < 0.5, los volteamos.
+                    if ny < 0.5:
+                        nx = 3.0 - nx
+                        ny = 1.0 - ny
+                
+                xs.append(nx)
+                ys.append(ny)
                 colors_traj.append(PLAYER_COLORS[0] if player == player1 else PLAYER_COLORS[1])
                 stroke_n = row.get("Stroke", "?")
-                phase    = row.get("Game Phase", "")
+                phase = row.get("Game Phase", "")
                 labels.append(f"Golpe {int(stroke_n) if pd.notna(stroke_n) else '?'} · {str(player).split()[0]}<br>Fase: {phase}")
 
-        if len(xs) < 2:
-            fig.add_annotation(x=1.5, y=0.5, text="Sin coordenadas para este rally",
-                               font=dict(color="white", size=12), showarrow=False)
+        if len(xs) < 1:
+            fig.add_annotation(x=0.5, y=1.5, text="Sin coordenadas", showarrow=False)
             add_net_label(fig)
             return fig
 
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines",
-            line=dict(color="rgba(255,255,255,0.3)", width=1.5, dash="dot"),
-            showlegend=False, hoverinfo="skip"))
+        
+        xs_swapped, ys_swapped = zip(*[swap_xy(x, y) for x, y in zip(xs, ys)])
+        
+        # 2. Reflejamos el eje Y (ancho de la pista) para corregir el efecto espejo
+        # Como el rango del ancho de la pista es de 0 a 3, reflejamos restando de 3.0
+        xs_rot = xs_swapped # El largo (0-1) se mantiene
+        ys_rot = [3.0 - y for y in ys_swapped] # Reflejamos el ancho
 
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers+text",
-            marker=dict(size=12, color=colors_traj, line=dict(width=1.5, color="rgba(0,0,0,0.5)")),
-            text=[str(i+1) for i in range(len(xs))],
-            textfont=dict(size=8, color="white"), textposition="middle center",
-            hovertext=labels, hovertemplate="%{hovertext}<extra></extra>",
-            showlegend=False))
+        # Líneas
+        fig.add_trace(go.Scatter(x=xs_rot, y=ys_rot, mode="lines",
+                                 line=dict(color="rgba(255,255,255,0.3)", width=1.5, dash="dot"),
+                                 showlegend=False, hoverinfo="skip"))
 
-        for i in range(len(xs) - 1):
-            fig.add_annotation(ax=xs[i], ay=ys[i], x=xs[i+1], y=ys[i+1],
-                xref="x", yref="y", axref="x", ayref="y",
-                showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.2,
-                arrowcolor="rgba(255,255,255,0.5)")
+        # Puntos
+        fig.add_trace(go.Scatter(x=xs_rot, y=ys_rot, mode="markers+text",
+                                 marker=dict(size=14, color=colors_traj, line=dict(width=1.5, color="black")),
+                                 text=[str(i+1) for i in range(len(xs_rot))],
+                                 textfont=dict(size=9, color="white"),
+                                 hovertext=labels, hovertemplate="%{hovertext}<extra></extra>",
+                                 showlegend=False))
 
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
-            marker=dict(size=10, color=PLAYER_COLORS[0]), name=player1.split()[0], showlegend=True))
-        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
-            marker=dict(size=10, color=PLAYER_COLORS[1]), name=player2.split()[0], showlegend=True))
+        # Flechas de dirección
+        for i in range(len(xs_rot)-1):
+            fig.add_annotation(ax=xs_rot[i], ay=ys_rot[i], x=xs_rot[i+1], y=ys_rot[i+1],
+                               xref="x", yref="y", axref="x", ayref="y",
+                               showarrow=True, arrowhead=2, arrowsize=1, arrowcolor="rgba(255,255,255,0.4)")
 
         add_net_label(fig)
         return fig
 
     st.plotly_chart(trajectory_fig(rally_strokes), use_container_width=True)
 
-    with st.expander("Ver golpes del rally"):
-        cols_show = [c for c in ["Stroke", jugador_col, "Zone", "Game Phase",
-                                  "Type of service", "Rally Outcome", "Barrido Fuerte", "Reves"]
-                     if c in rally_strokes.columns]
-        st.dataframe(rally_strokes[cols_show].reset_index(drop=True),
-                     use_container_width=True, height=200)
+    with st.expander("Ver tabla de golpes"):
+        st.dataframe(rally_strokes.reset_index(drop=True), use_container_width=True)
