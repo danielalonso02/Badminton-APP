@@ -7,9 +7,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import sys
 from pathlib import Path
+from utils import (get_df, preprocess, STYLES, PLAYER_COLORS, sidebar_logo,
+                   base_court_fig, zone_heatmap_fig, add_net_label,
+                   court_shapes, ZONE_COORDS_OWN, ZONE_COORDS_OPP)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from utils import get_df, preprocess, STYLES, sidebar_logo, PLAYER_COLORS
 
 st.set_page_config(page_title="Estadísticas jugadoras · Badminton", page_icon="🏸", layout="wide")
 sidebar_logo()
@@ -36,6 +38,54 @@ BASE_LAYOUT = dict(
 def ax(title=""):
     return dict(title=title, tickfont=dict(size=10, color=FONT_COL),
                 gridcolor=GRID_COL, zerolinecolor=GRID_COL)
+
+# ── Funciones helper de dibujo ─────────────
+def swap_xy(x, y):
+    return y, x
+
+# ── Funciones de Procesamiento de Coordenadas ──
+def parse_xy(nombre):
+    try:
+        # Extrae "X;Y" de cadenas tipo "2,5;15,3 (7)"
+        coords = str(nombre).split("(")[0].strip()
+        x, y = coords.split(";")
+        return float(x.replace(",", ".")), float(y.replace(",", "."))
+    except Exception:
+        return None, None
+
+def rotate_shapes(shapes):
+    rotated = []
+    for s in shapes:
+        s2 = s.copy()
+        if all(k in s2 for k in ["x0", "y0", "x1", "y1"]):
+            s2["x0"], s2["y0"] = s2["y0"], s2["x0"]
+            s2["x1"], s2["y1"] = s2["y1"], s2["x1"]
+        rotated.append(s2)
+    return rotated
+
+def normalize_xy(df_in):
+    out = df_in.copy()
+    X_HALF, Y_HALF = 22.0, 68.0
+    # Normalización idéntica a tu Mapa de Pista
+    out["nx"] = (out["coord_x"] + X_HALF) / (2 * X_HALF) * 3.0
+    out["ny"] = (out["coord_y"] + Y_HALF) / (2 * Y_HALF)
+    return out
+
+def base_court_fig_horizontal(title=""):
+    fig = go.Figure()
+    fig.update_layout(
+        title=dict(text=title, x=0, font=dict(size=14, color="#f9fafb")),
+        paper_bgcolor="#0f1117",
+        plot_bgcolor="#0f1117",
+        xaxis=dict(range=[-0.05, 1.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        yaxis=dict(range=[-0.05, 3.05], showgrid=False, zeroline=False, showticklabels=False, fixedrange=True),
+        height=520,
+        margin=dict(l=10, r=60, t=40, b=10),
+        shapes=rotate_shapes(court_shapes()),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.04, font=dict(size=11, color="#f9fafb"))
+    )
+    return fig
 
 
 # ─────────────────────────────────────────
@@ -215,73 +265,117 @@ else:
 
 
 # ─────────────────────────────────────────
-# 3 · RALLY OUTCOME · ERRORES
+# 3 · RALLY OUTCOME · ERRORES Y CAMPOGRAMA
 # ─────────────────────────────────────────
 st.markdown('<div class="section-title" style="font-size:14px;">Rally outcome · errores forzados y no forzados</div>',
             unsafe_allow_html=True)
 
 outcome_col = "Rally Outcome"
 if outcome_col in strokes.columns:
-    # Quedarse solo con la última fila de cada rally (donde está el resultado)
-    last_strokes = strokes.sort_values("Stroke").groupby("Rally").last().reset_index()
-    outcomes = last_strokes[outcome_col].dropna()
+    # 1. PREPARACIÓN DE DATOS (Igual que antes para asegurar nx/ny)
+    strokes_map = strokes.copy()
+    coords_parsed = strokes_map["Nombre"].apply(lambda n: pd.Series(parse_xy(n)))
+    strokes_map["coord_x"] = coords_parsed[0]
+    strokes_map["coord_y"] = coords_parsed[1]
+    strokes_map = normalize_xy(strokes_map)
 
+    # Relleno de coordenadas para los finales de rally
+    strokes_map = strokes_map.sort_values(["Set", "Rally", "Stroke"])
+    strokes_map["nx"] = strokes_map.groupby(["Set", "Rally"])["nx"].ffill()
+    strokes_map["ny"] = strokes_map.groupby(["Set", "Rally"])["ny"].ffill()
+
+    # Obtener el último golpe de cada rally
+    last_strokes = strokes_map.groupby(["Set", "Rally"]).last().reset_index()
+    
     def classify_outcome(outcome, p1_name, p2_name):
         o = str(outcome)
-        if f"Error {p2_name}" in o:   return p1_name.split()[0], "Error no forzado"
-        if f"Error {p1_name}" in o:   return p2_name.split()[0], "Error no forzado"
-        if f"Unforced {p1_name}" in o: return p2_name.split()[0], "Error no forzado"
-        if f"Unforced {p2_name}" in o: return p1_name.split()[0], "Error no forzado"
-        if p1_name in o:               return p1_name.split()[0], "Punto ganado"
-        if p2_name in o:               return p2_name.split()[0], "Punto ganado"
+        if any(x in o for x in [f"Error {p2_name}", f"Unforced {p2_name}"]):
+            return p1_name.split()[0], "Error no forzado"
+        if any(x in o for x in [f"Error {p1_name}", f"Unforced {p1_name}"]):
+            return p2_name.split()[0], "Error no forzado"
+        if p1_name in o: return p1_name.split()[0], "Punto ganado"
+        if p2_name in o: return p2_name.split()[0], "Punto ganado"
         return "Otro", o
 
-    classified = last_strokes[outcome_col].dropna().apply(
-        lambda o: pd.Series(classify_outcome(o, player1, player2),
-                            index=["ganador", "tipo"])
+    classified = last_strokes[outcome_col].apply(
+        lambda o: pd.Series(classify_outcome(o, player1, player2), index=["ganador", "tipo"])
     )
     last_strokes = last_strokes.join(classified)
 
+    # --- A. GRÁFICO DE BARRAS (Original: Ancho completo) ---
     all_tipos = ["Error no forzado", "Punto ganado"]
-
     total_rallies = len(last_strokes)
     fig_out = go.Figure()
-    for player, color in [(player1.split()[0], PLAYER_COLORS[0]),
+    
+    for player, color in [(player1.split()[0], PLAYER_COLORS[0]), 
                           (player2.split()[0], PLAYER_COLORS[1])]:
         pdata_out = last_strokes[last_strokes["ganador"] == player]
-        tipo_counts = pdata_out["tipo"].value_counts() if not pdata_out.empty else pd.Series()
+        tipo_counts = pdata_out["tipo"].value_counts()
         vals = [int(tipo_counts.get(t, 0)) for t in all_tipos]
         pcts = [round(v / total_rallies * 100, 1) if total_rallies > 0 else 0 for v in vals]
+        
         fig_out.add_trace(go.Bar(
-            name=player,
-            x=all_tipos, y=vals,
+            name=player, x=all_tipos, y=vals,
             marker_color=color, opacity=0.85,
             text=[f"{p}%" for p in pcts],
             textposition="outside",
             textfont=dict(size=10, color=FONT_COL),
         ))
-    max_val_out = max([int(last_strokes[last_strokes["ganador"]==p]["tipo"].value_counts().get(t,0))
-                       for p in [player1.split()[0], player2.split()[0]] for t in all_tipos], default=1)
+
     fig_out.update_layout(**BASE_LAYOUT, barmode="group", height=320,
         title=dict(text="Puntos ganados por tipo · comparativa", font=dict(size=12, color=FONT_COL), x=0),
         xaxis=dict(tickfont=dict(size=12, color="#f9fafb"), gridcolor=GRID_COL),
-        yaxis=dict(**ax("Nº puntos"), range=[0, max_val_out * 1.25]))
-    fig_out.update_layout(legend=dict(orientation="h", y=-0.18, font=dict(size=11, color="#f9fafb")))
+        yaxis=dict(**ax("Nº puntos"), range=[0, last_strokes["tipo"].value_counts().max() * 1.3 if not last_strokes.empty else 10]))
     st.plotly_chart(fig_out, use_container_width=True)
 
-    # Tabla resumen
+    # --- B. TABLA RESUMEN (Original: Debajo del gráfico) ---
     summary_rows = []
     for player in [player1.split()[0], player2.split()[0]]:
         pdata_out = last_strokes[last_strokes["ganador"] == player]
-        total      = len(pdata_out)
-        ganados    = len(pdata_out[pdata_out["tipo"] == "Punto ganado"])
-        errores    = len(pdata_out[pdata_out["tipo"] == "Error no forzado"])
-        summary_rows.append({"Jugadora": player, "Puntos totales": total,
-                              "Puntos directos": ganados, "Errores rivales": errores})
-    st.dataframe(pd.DataFrame(summary_rows).set_index("Jugadora"),
-                 use_container_width=True)
+        summary_rows.append({
+            "Jugadora": player, 
+            "Puntos totales": len(pdata_out),
+            "Puntos directos": len(pdata_out[pdata_out["tipo"] == "Punto ganado"]), 
+            "Errores rivales": len(pdata_out[pdata_out["tipo"] == "Error no forzado"])
+        })
+    st.dataframe(pd.DataFrame(summary_rows).set_index("Jugadora"), use_container_width=True)
+
+    # --- C. CAMPOGRAMA (Nueva sección visual debajo) ---
+    st.markdown('<div style="font-size:13px; color:#9ca3af; margin: 20px 0 10px 0;">Localización de Winners (●) y Errores (X) · Vista Estabilizada</div>', unsafe_allow_html=True)
+    
+    fig_map = base_court_fig_horizontal("")
+    symbols = {"Punto ganado": "circle", "Error no forzado": "x"}
+    
+    for p_full, color in [(player1, PLAYER_COLORS[0]), (player2, PLAYER_COLORS[1])]:
+        p_short = p_full.split()[0]
+        df_p = last_strokes[(last_strokes["ganador"] == p_short) & last_strokes["nx"].notna()].copy()
+        
+        for tipo in ["Punto ganado", "Error no forzado"]:
+            df_t = df_p[df_p["tipo"] == tipo].copy()
+            if not df_t.empty:
+                # Lógica de estabilización de lado
+                def stabilize(row):
+                    nx, ny = row["nx"], row["ny"]
+                    if p_full == player1 and ny > 0.5: nx, ny = 3.0 - nx, 1.0 - ny
+                    elif p_full == player2 and ny < 0.5: nx, ny = 3.0 - nx, 1.0 - ny
+                    return pd.Series([nx, ny])
+
+                df_t[["nx_s", "ny_s"]] = df_t.apply(stabilize, axis=1)
+                xs_plot = df_t["ny_s"].tolist()
+                ys_plot = [3.0 - x for x in df_t["nx_s"].tolist()] 
+
+                fig_map.add_trace(go.Scatter(
+                    x=xs_plot, y=ys_plot, mode="markers",
+                    name=f"{p_short} ({tipo})",
+                    marker=dict(symbol=symbols[tipo], size=11, color=color, line=dict(width=1, color="white")),
+                    hovertemplate=f"<b>{p_short}</b><br>{tipo}<extra></extra>"
+                ))
+
+    add_net_label(fig_map)
+    st.plotly_chart(fig_map, use_container_width=True)
+
 else:
-    st.info("No se encontró la columna 'Rally Outcome'.")
+    st.info("No se encontró la columna 'Rally Outcome' para generar el campograma.")
 
 
 # ─────────────────────────────────────────
